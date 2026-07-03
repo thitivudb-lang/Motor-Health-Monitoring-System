@@ -1,0 +1,286 @@
+#include <Wire.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <Adafruit_Sensor.h>
+#include <Adafruit_ADXL345_U.h>
+#include <WiFi.h>
+#include <time.h>
+#include <Firebase_ESP_Client.h>
+#include "addons/TokenHelper.h"
+#include "addons/RTDBHelper.h"
+
+#define WIFI_SSID     "god"
+#define WIFI_PASSWORD "godji2548"
+#define API_KEY       "AIzaSyD5YO3H_DYiitF4fJdpbWsGWKBDprPto_Y"
+#define DATABASE_URL  "https://motor2-a75b1-default-rtdb.firebaseio.com"
+
+#define HALL_PIN      23
+#define ONE_WIRE_BUS   4
+#define ACS712_PIN    34
+#define ENA 25
+#define IN1 26
+#define IN2 27
+
+#define UPDATE_INTERVAL_MS   1000
+#define HISTORY_INTERVAL_MS  10000
+#define COMMAND_INTERVAL_MS  500   // เช็คคำสั่งจาก Firebase ทุก 500ms
+
+const char* NTP_SERVER     = "pool.ntp.org";
+const long  GMT_OFFSET_SEC = 7 * 3600;
+const int   DST_OFFSET_SEC = 0;
+bool timeSynced = false;
+
+float zeroVoltage = 2.50;
+
+FirebaseData   fbdo;
+FirebaseData   fbdoCmd;   // แยก FirebaseData สำหรับอ่านคำสั่ง
+FirebaseAuth   auth;
+FirebaseConfig config;
+
+bool signupOK  = false;
+bool adxlFound = false;
+bool motorOn   = true;    // สถานะมอเตอร์ปัจจุบัน
+
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature ds18b20(&oneWire);
+Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
+
+volatile unsigned long pulseCount = 0;
+volatile unsigned long totalCount = 0;
+
+void IRAM_ATTR hallISR() {
+  pulseCount++;
+  totalCount++;
+}
+
+unsigned long getUnixTime() {
+  time_t now;
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 100)) return 0;
+  time(&now);
+  return (unsigned long)now;
+}
+
+void calibrateCurrentSensor() {
+  long sum = 0;
+  const int samples = 500;
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(ACS712_PIN);
+    delayMicroseconds(200);
+  }
+  zeroVoltage = (sum / (float)samples / 4095.0) * 3.3;
+  Serial.printf("Calibrated zero voltage: %.4f V\n", zeroVoltage);
+}
+
+void motorON() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(ENA, HIGH);
+  motorOn = true;
+  Serial.println(">>> Motor ON");
+}
+
+void motorOFF() {
+  digitalWrite(ENA, LOW);
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  motorOn = false;
+  Serial.println(">>> Motor OFF");
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  analogReadResolution(12);
+  pinMode(ACS712_PIN, INPUT);
+  calibrateCurrentSensor();
+
+  pinMode(ENA, OUTPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  motorON(); // เริ่มต้นเปิดมอเตอร์
+
+  Serial.print("Connecting WiFi");
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
+    delay(500);
+    Serial.print(".");
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("\nWiFi OK: ");
+    Serial.println(WiFi.localIP());
+    configTime(GMT_OFFSET_SEC, DST_OFFSET_SEC, NTP_SERVER);
+    Serial.print("Syncing NTP time");
+    struct tm timeinfo;
+    unsigned long ntpStart = millis();
+    while (!getLocalTime(&timeinfo, 100) && millis() - ntpStart < 10000) {
+      Serial.print(".");
+      delay(200);
+    }
+    if (getLocalTime(&timeinfo)) {
+      timeSynced = true;
+      Serial.println("\nNTP OK: " + String(asctime(&timeinfo)));
+    } else {
+      Serial.println("\nNTP FAILED");
+    }
+  } else {
+    Serial.println("\nWiFi FAILED");
+  }
+
+  config.api_key = API_KEY;
+  config.database_url = DATABASE_URL;
+  config.token_status_callback = tokenStatusCallback;
+
+  if (Firebase.signUp(&config, &auth, "", "")) {
+    Serial.println("Firebase signup OK");
+    signupOK = true;
+  } else {
+    Serial.print("Firebase signup FAILED: ");
+    Serial.println(config.signer.signupError.message.c_str());
+  }
+  Firebase.begin(&config, &auth);
+  Firebase.reconnectWiFi(true);
+
+  // ตั้งค่าเริ่มต้น command เป็น ON ใน Firebase
+  if (signupOK) {
+    Firebase.RTDB.setString(&fbdoCmd, "/motor/command", "ON");
+  }
+
+  pinMode(HALL_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(HALL_PIN), hallISR, FALLING);
+
+  ds18b20.begin();
+
+  Wire.begin(21, 22);
+  adxlFound = accel.begin();
+  if (adxlFound) {
+    accel.setRange(ADXL345_RANGE_16_G);
+    Serial.println("ADXL345 OK");
+  } else {
+    Serial.println("ADXL345 not found");
+  }
+
+  Serial.println("================================");
+  Serial.println("Motor Monitor Started");
+  Serial.println("Commands: ON / OFF via Firebase /motor/command");
+  Serial.println("================================");
+}
+
+void loop() {
+  static unsigned long lastUpdateTime  = 0;
+  static unsigned long lastHistoryTime = 0;
+  static unsigned long lastCommandTime = 0;
+
+  if (WiFi.status() != WL_CONNECTED) WiFi.reconnect();
+
+  if (!signupOK && WiFi.status() == WL_CONNECTED) {
+    if (Firebase.signUp(&config, &auth, "", "")) {
+      Serial.println("Firebase signup OK (retry)");
+      signupOK = true;
+    }
+  }
+
+  if (!timeSynced && WiFi.status() == WL_CONNECTED) {
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 100)) {
+      timeSynced = true;
+      Serial.println("NTP synced (late)");
+    }
+  }
+
+  // ── อ่านคำสั่ง ON/OFF จาก Firebase ทุก 500ms ──────────────
+  if (millis() - lastCommandTime >= COMMAND_INTERVAL_MS) {
+    if (Firebase.ready() && signupOK) {
+      if (Firebase.RTDB.getString(&fbdoCmd, "/motor/command")) {
+        String cmd = fbdoCmd.stringData();
+        cmd.trim();
+        if (cmd == "ON" && !motorOn) {
+          motorON();
+        } else if (cmd == "OFF" && motorOn) {
+          motorOFF();
+        }
+      }
+    }
+    lastCommandTime = millis();
+  }
+
+  // ── อ่านเซนเซอร์และอัปโหลด Firebase ──────────────────────
+  if (millis() - lastUpdateTime >= UPDATE_INTERVAL_MS) {
+
+    noInterrupts();
+    unsigned long count = pulseCount;
+    pulseCount = 0;
+    unsigned long total = totalCount;
+    interrupts();
+    float rpm = count * 60.0;
+
+    ds18b20.requestTemperatures();
+    float tempC = ds18b20.getTempCByIndex(0);
+    bool tempOK = (tempC != DEVICE_DISCONNECTED_C);
+
+    long adcSum = 0;
+    for (int i = 0; i < 100; i++) {
+      adcSum += analogRead(ACS712_PIN);
+      delayMicroseconds(200);
+    }
+    float voltage = (adcSum / 100.0 / 4095.0) * 3.3;
+    float current = (voltage - zeroVoltage) / 0.100;
+
+    float vibration = 0;
+    bool vibOK = false;
+    if (adxlFound) {
+      sensors_event_t event;
+      accel.getEvent(&event);
+      vibration = sqrt(
+        event.acceleration.x * event.acceleration.x +
+        event.acceleration.y * event.acceleration.y +
+        event.acceleration.z * event.acceleration.z
+      );
+      vibOK = true;
+    }
+
+    unsigned long unixTime = getUnixTime();
+
+    Serial.printf("RPM:%.1f Total:%lu Temp:%s Current:%.2fA Vib:%s Motor:%s Time:%lu\n",
+      rpm, total,
+      tempOK ? String(tempC, 1).c_str() : "N/A",
+      current,
+      vibOK ? String(vibration, 2).c_str() : "N/A",
+      motorOn ? "ON" : "OFF",
+      unixTime);
+
+    if (WiFi.status() == WL_CONNECTED && Firebase.ready() && signupOK) {
+      FirebaseJson json;
+      json.set("rpm",     rpm);
+      json.set("current", current);
+      json.set("total",   (int)total);
+      json.set("motor",   motorOn ? "ON" : "OFF");
+      if (tempOK) json.set("temperature", tempC);
+      if (vibOK)  json.set("vibration", vibration);
+      if (unixTime > 0) json.set("timestamp", (double)unixTime);
+
+      if (Firebase.RTDB.setJSON(&fbdo, "/motor/current", &json)) {
+        Serial.println("-> Uploaded OK");
+      } else {
+        Serial.print("-> Upload FAIL: ");
+        Serial.println(fbdo.errorReason());
+      }
+
+      if (millis() - lastHistoryTime >= HISTORY_INTERVAL_MS) {
+        if (Firebase.RTDB.pushJSON(&fbdo, "/motor/history", &json)) {
+          Serial.println("-> History pushed OK");
+        } else {
+          Serial.print("-> History push FAIL: ");
+          Serial.println(fbdo.errorReason());
+        }
+        lastHistoryTime = millis();
+      }
+    } else {
+      Serial.println("-> Skip upload (WiFi/Firebase not ready)");
+    }
+
+    lastUpdateTime = millis();
+  }
+}
