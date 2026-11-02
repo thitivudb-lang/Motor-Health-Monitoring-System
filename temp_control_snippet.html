@@ -1,0 +1,58 @@
+<!-- ===== แผงตั้งค่าอุณหภูมิ: วางตรงไหนก็ได้ในหน้า dashboard_fault.html ===== -->
+<div id="tempBox" style="padding:12px 16px;border:1px solid #ccd3da;border-radius:10px;max-width:420px;font-family:inherit">
+  <label style="display:flex;gap:8px;align-items:center;font-weight:600">
+    <input type="checkbox" id="tempManual">
+    ใช้อุณหภูมิที่กำหนดเอง (เซนเซอร์เสีย)
+  </label>
+
+  <div style="display:flex;gap:10px;align-items:center;margin-top:10px">
+    <input type="range" id="tempSlider" min="0" max="150" step="1" value="40" style="flex:1">
+    <input type="number" id="tempNum" min="0" max="150" step="1" value="40" style="width:70px">
+    <span>°C</span>
+  </div>
+
+  <div id="tempSrc" style="margin-top:8px;font-size:13px;opacity:.75"></div>
+</div>
+
+<script>
+// ใช้ตัวแปร socket ที่หน้าเดิมสร้างไว้แล้ว (const socket = io(); ...)
+// ถ้าหน้าเดิมตั้งชื่อตัวแปรอื่น ให้แก้คำว่า socket ด้านล่างให้ตรง
+(function () {
+  const chk = document.getElementById("tempManual");
+  const sld = document.getElementById("tempSlider");
+  const num = document.getElementById("tempNum");
+  const src = document.getElementById("tempSrc");
+
+  function send() {
+    socket.emit("set_temp", {
+      mode: chk.checked ? "manual" : "sensor",
+      value: parseFloat(num.value)
+    });
+  }
+
+  function applySetting(s) {
+    if (!s) return;
+    chk.checked = (s.mode === "manual");
+    sld.value = s.value;
+    num.value = s.value;
+    sld.disabled = num.disabled = !chk.checked;
+  }
+
+  chk.addEventListener("change", send);
+  sld.addEventListener("input", () => { num.value = sld.value; send(); });
+  num.addEventListener("change", () => { sld.value = num.value; send(); });
+
+  socket.on("init", d => applySetting(d.temp_setting));
+  socket.on("temp_setting", applySetting);
+
+  // แสดงว่ากำลังใช้ค่าไหนอยู่ จากข้อมูลล่าสุดที่ส่งเข้ามา
+  socket.on("reading", r => {
+    if (r.temp_source === "manual") {
+      src.textContent = "กำลังใช้ค่าที่ตั้งเอง " + r.values.temp.toFixed(1) +
+        " °C (เซนเซอร์อ่านได้ " + r.temp_sensor.toFixed(1) + " °C)";
+    } else {
+      src.textContent = "กำลังใช้ค่าจากเซนเซอร์ " + r.values.temp.toFixed(1) + " °C";
+    }
+  });
+})();
+</script>

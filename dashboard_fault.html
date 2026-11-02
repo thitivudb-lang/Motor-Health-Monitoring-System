@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motor Fault Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+:root{--bg:#07080a;--panel:rgba(255,255,255,.03);--ink:#e9e7e1;--steel:#8a8780;--line:rgba(255,255,255,.16);
+      --gold:#f2b233;--gold-soft:rgba(242,178,51,.14);--idle:#8a8780;--state:var(--idle)}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{margin:0;min-height:100vh;color:var(--ink);font-family:"Prompt","IBM Plex Sans Thai",system-ui,sans-serif;line-height:1.5;
+  background:
+    radial-gradient(ellipse 60% 35% at 50% 0%,rgba(242,178,51,.08),transparent 70%),
+    radial-gradient(1.2px 1.2px at 20px 30px,rgba(255,255,255,.5),transparent 60%) 0 0/160px 130px,
+    radial-gradient(1px 1px at 90px 80px,rgba(255,255,255,.35),transparent 60%) 0 0/220px 170px,
+    var(--bg);
+  animation:drift 140s linear infinite}
+@keyframes drift{to{background-position:0 0,160px 130px,-220px 170px,0 0}}
+.wrap{max-width:1180px;margin:0 auto;padding:22px 16px 40px}
+header{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px;
+  padding-bottom:14px;border-bottom:1px solid var(--line)}
+h1{font-size:20px;margin:0;font-weight:500;letter-spacing:.02em;display:flex;align-items:center;gap:12px}
+h1::before{content:"";width:4px;height:22px;background:var(--gold);border-radius:1px;box-shadow:0 0 12px rgba(242,178,51,.6)}
+.conn{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--steel)}
+.dot{width:10px;height:10px;border-radius:50%;background:#e5584d;box-shadow:0 0 8px rgba(229,88,77,.6)}
+.dot.on{background:var(--gold);box-shadow:0 0 10px rgba(242,178,51,.8);animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.45}}
+.top{display:grid;grid-template-columns:1.4fr 1fr;gap:16px}
+.panel{position:relative;overflow:hidden;background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:16px}
+.panel::before{content:"";position:absolute;top:-1px;left:-1px;width:26px;height:26px;
+  border-top:2px solid var(--gold);border-left:2px solid var(--gold);border-top-left-radius:4px;pointer-events:none}
+.panel h2{font-size:12px;font-weight:500;color:var(--steel);margin:0 0 12px;letter-spacing:.1em;text-transform:uppercase}
+.status{border-left:10px solid var(--state);display:flex;flex-direction:column;justify-content:center;min-height:210px;transition:border-color .3s}
+.status::after{content:"";position:absolute;left:0;right:0;top:-40%;height:40%;pointer-events:none;
+  background:linear-gradient(180deg,transparent,rgba(242,178,51,.07),transparent);animation:scan 8s linear infinite}
+@keyframes scan{to{top:110%}}
+.status .name{font-size:clamp(32px,5.5vw,54px);font-weight:600;line-height:1.2;color:var(--state);overflow-wrap:anywhere;
+  text-shadow:0 0 22px color-mix(in srgb,var(--state) 45%,transparent)}
+.status .desc{margin-top:4px;font-size:16px;color:var(--steel)}
+.status .meta{display:flex;gap:28px;flex-wrap:wrap;margin-top:14px;color:var(--steel);font-size:14px}
+.status .meta b{color:var(--ink);font-weight:500}
+.bar{display:grid;grid-template-columns:150px 1fr 56px;align-items:center;gap:10px;margin:9px 0;font-size:14px}
+.track{height:10px;background:rgba(255,255,255,.08);border-radius:2px;overflow:hidden}
+.fill{height:100%;width:0;transition:width .35s;box-shadow:0 0 8px currentColor}
+.bar span:last-child{text-align:right;font-variant-numeric:tabular-nums}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:16px}
+.chart-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.chart-head h2{margin:0}
+.val{font-size:28px;font-weight:500;font-variant-numeric:tabular-nums;color:#fff3d6}
+.val small{font-size:13px;font-weight:400;color:var(--steel);margin-left:4px}
+.chart-box{position:relative;height:170px}
+.legend{display:flex;gap:14px;font-size:13px;color:var(--steel)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px}
+.legend b{color:var(--ink);font-weight:500}
+table{width:100%;border-collapse:collapse;font-size:14px;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:8px 8px;border-bottom:1px solid rgba(255,255,255,.1);white-space:nowrap}
+th{font-weight:500;color:var(--gold);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+tbody tr:hover{background:var(--gold-soft)}
+.tbl{overflow-x:auto}
+#err{display:none;margin-top:12px;padding:10px 14px;background:rgba(229,88,77,.12);border:1px solid rgba(229,88,77,.5);border-radius:4px;color:#ff9a90;font-size:14px}
+
+/* ===== ตั้งค่าอุณหภูมิเอง ===== */
+.tctl{margin-top:10px;padding-top:10px;border-top:1px solid var(--line);font-size:14px}
+.tctl .sw{display:flex;gap:8px;align-items:center;font-weight:500;cursor:pointer}
+.tctl .row{display:flex;gap:10px;align-items:center;margin-top:8px}
+.tctl .row.off{opacity:.4}
+.tctl input[type=range]{flex:1}
+.tctl input[type=checkbox],.tctl input[type=range]{accent-color:var(--gold)}
+.tctl input[type=number]{width:72px;padding:4px 6px;border:1px solid var(--line);border-radius:4px;font:inherit;background:#0d0f12;color:var(--ink)}
+.tctl input[type=number]:focus{outline:none;border-color:var(--gold)}
+.tctl .src{margin-top:6px;font-size:13px;color:var(--steel)}
+.tctl .src.manual{color:var(--gold)}
+
+@media(max-width:820px){.top,.grid{grid-template-columns:1fr}.bar{grid-template-columns:110px 1fr 52px}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>แจ้งเตือนความผิดปกติมอเตอร์</h1>
+    <div class="conn"><span class="dot" id="webdot"></span><span id="conntext">กำลังเชื่อมต่อ...</span></div>
+  </header>
+
+  <div class="top">
+    <section class="panel status" id="status">
+      <h2 style="margin-bottom:6px">สถานะมอเตอร์ตอนนี้</h2>
+      <div class="name" id="label">รอข้อมูล</div>
+      <div class="desc" id="desc"></div>
+      <div class="meta"><span>อัปเดตล่าสุด <b id="last">–</b></span><span id="confwrap" style="display:none">ความมั่นใจ <b id="conf">–</b></span></div>
+    </section>
+    <section class="panel">
+      <h2>ความน่าจะเป็นของแต่ละสถานะ</h2>
+      <div id="probs"><span style="color:var(--steel);font-size:14px">รอข้อมูล</span></div>
+    </section>
+  </div>
+
+  <div class="grid">
+    <section class="panel">
+      <div class="chart-head"><h2>ความเร็วรอบ</h2><div class="val"><span id="v-rpm">–</span><small>rpm</small></div></div>
+      <div class="chart-box"><canvas id="c-rpm"></canvas></div>
+      <div class="legend" style="margin-top:6px"><span><i style="background:#f2b233"></i>รอบจริง</span><span><i style="background:#8a8780"></i>เป้าหมาย <b id="v-target">–</b></span></div>
+    </section>
+    <section class="panel">
+      <div class="chart-head"><h2>อุณหภูมิ</h2><div class="val"><span id="v-temp">–</span><small>°C</small></div></div>
+      <div class="chart-box"><canvas id="c-temp"></canvas></div>
+
+      <!-- ตั้งค่าอุณหภูมิเอง (ใช้เมื่อเซนเซอร์เสีย) -->
+      <div class="tctl">
+        <label class="sw"><input type="checkbox" id="tempManual"> ใช้อุณหภูมิที่กำหนดเอง (เซนเซอร์เสีย)</label>
+        <div class="row off" id="tempRow">
+          <input type="range" id="tempSlider" min="0" max="150" step="1" value="40" disabled>
+          <input type="number" id="tempNum" min="0" max="150" step="1" value="40" disabled>
+          <span>°C</span>
+        </div>
+        <div class="src" id="tempSrc">รอข้อมูล</div>
+      </div>
+    </section>
+    <section class="panel">
+      <div class="chart-head"><h2>กระแสไฟ และ PWM</h2><div class="val"><span id="v-current">–</span><small>A</small></div></div>
+      <div class="chart-box"><canvas id="c-cur"></canvas></div>
+      <div class="legend" style="margin-top:6px"><span><i style="background:#f2b233"></i>กระแส</span><span><i style="background:#8a8780"></i>PWM <b id="v-pwm">–</b></span></div>
+    </section>
+    <section class="panel">
+      <div class="chart-head"><h2>การสั่นสะเทือน</h2>
+        <div class="legend"><span><i style="background:#ff6b5e"></i>X <b id="v-vx">–</b></span><span><i style="background:#4fd69c"></i>Y <b id="v-vy">–</b></span><span><i style="background:#6fa8ff"></i>Z <b id="v-vz">–</b></span></div>
+      </div>
+      <div class="chart-box"><canvas id="c-vib"></canvas></div>
+    </section>
+  </div>
+
+  <section class="panel" style="margin-top:16px">
+    <h2>ผลการทำนายล่าสุด</h2>
+    <div class="tbl"><table>
+      <thead><tr><th>เวลา</th><th>สถานะ</th><th>rpm</th><th>temp</th><th>vx</th><th>vy</th><th>vz</th><th>current</th><th>pwm</th></tr></thead>
+      <tbody id="rows"><tr><td colspan="9" style="color:var(--steel)">ยังไม่มีข้อมูลจากมอเตอร์ — ตรวจสอบว่า MQTT กำลังส่งข้อมูลมาที่ topic นี้</td></tr></tbody>
+    </table></div>
+  </section>
+  <div id="err" role="alert"></div>
+</div>
+
+<script>
+const MAX_POINTS = 60, STALE_MS = 10000;
+const $ = id => document.getElementById(id);
+const fmt = (v,d=2) => Number(v).toFixed(d);
+const clock = ts => new Date(ts*1000).toLocaleTimeString('th-TH',{hour12:false});
+let meta = {}, classes = [], lastTs = 0, rowsData = [];
+const info = id => meta[id] || {name:'Unknown ('+id+')', desc:'', color:'#8a8780'};
+
+Chart.defaults.font.family = '"Prompt", "IBM Plex Sans Thai", sans-serif';
+Chart.defaults.color = '#8a8780';
+function mk(id, sets){
+  return new Chart($(id), {
+    type:'line',
+    data:{labels:[], datasets:sets.map(s=>({label:s.l,data:[],borderColor:s.c,backgroundColor:s.c,borderWidth:2,borderDash:s.d||[],pointRadius:0,tension:.25,yAxisID:s.y||'y'}))},
+    options:{animation:false,responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+      plugins:{legend:{display:false}},
+      scales:{x:{ticks:{maxTicksLimit:5,maxRotation:0},grid:{display:false}},
+              y:{grid:{color:'rgba(255,255,255,.08)'}},
+              y2:{display:sets.some(s=>s.y==='y2'),position:'right',grid:{display:false}}}}
+  });
+}
+const ch = {
+  rpm: mk('c-rpm',[{l:'rpm',c:'#f2b233'},{l:'target',c:'#8a8780',d:[6,4]}]),
+  temp: mk('c-temp',[{l:'temp',c:'#ff8a3d'}]),
+  cur: mk('c-cur',[{l:'current',c:'#f2b233'},{l:'pwm',c:'#8a8780',y:'y2'}]),
+  vib: mk('c-vib',[{l:'vx',c:'#ff6b5e'},{l:'vy',c:'#4fd69c'},{l:'vz',c:'#6fa8ff'}])
+};
+function push(chart, label, vals){
+  chart.data.labels.push(label);
+  vals.forEach((v,i)=>chart.data.datasets[i].data.push(v));
+  if (chart.data.labels.length > MAX_POINTS){
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(d=>d.data.shift());
+  }
+  chart.update('none');
+}
+
+function buildBars(){
+  $('probs').innerHTML = classes.map(c=>
+    `<div class="bar"><span>${c.name}</span><div class="track"><div class="fill" id="f${c.id}" style="background:${c.color}"></div></div><span id="p${c.id}">0%</span></div>`
+  ).join('');
+}
+
+function addReading(r, live=true){
+  const t = clock(r.ts), v = r.values;
+  push(ch.rpm, t, [v.rpm, r.target_rpm]);
+  push(ch.temp, t, [v.temp]);
+  push(ch.cur, t, [v.current, v.pwm]);
+  push(ch.vib, t, [v.vx, v.vy, v.vz]);
+  rowsData.unshift(r); rowsData = rowsData.slice(0,10);
+  if (!live) return;
+
+  lastTs = r.ts;
+  const s = info(r.pred);
+  $('status').style.setProperty('--state', s.color);
+  $('label').textContent = s.name;
+  $('desc').textContent = s.desc;
+  $('last').textContent = t;
+  if (r.probs){
+    $('confwrap').style.display = '';
+    $('conf').textContent = fmt(Math.max(...Object.values(r.probs))*100,1)+'%';
+    classes.forEach(c=>{
+      const p = (r.probs[c.id]||0)*100;
+      const f = $('f'+c.id); if (f){ f.style.width = p+'%'; $('p'+c.id).textContent = fmt(p,1)+'%'; }
+    });
+  }
+  $('v-rpm').textContent = fmt(v.rpm,0);
+  $('v-target').textContent = r.target_rpm==null ? '–' : fmt(r.target_rpm,0);
+  $('v-temp').textContent = fmt(v.temp,1);
+  $('v-current').textContent = fmt(v.current,2);
+  $('v-pwm').textContent = fmt(v.pwm,0);
+  $('v-vx').textContent = fmt(v.vx,2);
+  $('v-vy').textContent = fmt(v.vy,2);
+  $('v-vz').textContent = fmt(v.vz,2);
+  updateTempSrc(r);
+  renderRows();
+}
+
+function renderRows(){
+  $('rows').innerHTML = rowsData.map(r=>{
+    const s = info(r.pred), v = r.values;
+    const manual = r.temp_source === 'manual';
+    return `<tr><td>${clock(r.ts)}</td><td style="color:${s.color};font-weight:500">${s.name}</td><td>${fmt(v.rpm,0)}</td><td${manual?' style="color:#f2b233" title="ค่าที่ตั้งเอง"':''}>${fmt(v.temp,1)}${manual?'*':''}</td><td>${fmt(v.vx,2)}</td><td>${fmt(v.vy,2)}</td><td>${fmt(v.vz,2)}</td><td>${fmt(v.current,2)}</td><td>${fmt(v.pwm,0)}</td></tr>`;
+  }).join('');
+}
+
+// ===== ตั้งค่าอุณหภูมิเอง =====
+const tChk = $('tempManual'), tSld = $('tempSlider'), tNum = $('tempNum');
+let sendTimer = null;
+
+function sendTemp(){
+  clearTimeout(sendTimer);
+  sendTimer = setTimeout(()=>{
+    const val = parseFloat(tNum.value);
+    socket.emit('set_temp', {
+      mode: tChk.checked ? 'manual' : 'sensor',
+      value: isNaN(val) ? 40 : val
+    });
+  }, 150);
+}
+
+function applyTemp(s){
+  if (!s) return;
+  tChk.checked = (s.mode === 'manual');
+  tSld.value = s.value;
+  tNum.value = s.value;
+  tSld.disabled = tNum.disabled = !tChk.checked;
+  $('tempRow').classList.toggle('off', !tChk.checked);
+}
+
+function updateTempSrc(r){
+  const el = $('tempSrc');
+  const manual = r.temp_source === 'manual';
+  el.classList.toggle('manual', manual);
+  if (manual && r.temp_sensor != null){
+    el.textContent = 'กำลังใช้ค่าที่ตั้งเอง ' + fmt(r.values.temp,1) + ' °C (เซนเซอร์อ่านได้ ' + fmt(r.temp_sensor,1) + ' °C)';
+  } else {
+    el.textContent = 'กำลังใช้ค่าจากเซนเซอร์ ' + fmt(r.values.temp,1) + ' °C';
+  }
+}
+
+tChk.addEventListener('change', sendTemp);
+tSld.addEventListener('input', ()=>{ tNum.value = tSld.value; sendTemp(); });
+tNum.addEventListener('change', ()=>{ tSld.value = tNum.value; sendTemp(); });
+
+let mqttOk = false, srv = '';
+function setConn(webOk){
+  $('webdot').classList.toggle('on', webOk && mqttOk);
+  $('conntext').textContent = !webOk ? 'ขาดการเชื่อมต่อกับเซิร์ฟเวอร์'
+    : !mqttOk ? 'เซิร์ฟเวอร์ทำงาน แต่ยังเชื่อมต่อ MQTT ไม่ได้'
+    : 'เชื่อมต่อ MQTT แล้ว' + (srv ? ' · ' + srv : '');
+}
+
+const socket = io();
+socket.on('connect', ()=>setConn(true));
+socket.on('disconnect', ()=>{ mqttOk = false; setConn(false); });
+socket.on('init', d=>{
+  classes = d.classes; meta = Object.fromEntries(classes.map(c=>[c.id,c]));
+  buildBars();
+  mqttOk = d.mqtt; srv = d.broker + ' / ' + d.topic; setConn(true);
+  if (d.temp_range){
+    tSld.min = tNum.min = d.temp_range.min;
+    tSld.max = tNum.max = d.temp_range.max;
+  }
+  applyTemp(d.temp_setting);
+  d.history.forEach((r,i)=>addReading(r, i === d.history.length-1));
+});
+socket.on('temp_setting', applyTemp);
+socket.on('mqtt', d=>{ mqttOk = d.connected; setConn(true); });
+socket.on('reading', r=>{ $('err').style.display='none'; addReading(r); });
+socket.on('error', d=>{ $('err').textContent = 'อ่านข้อมูลจาก MQTT ไม่ได้: ' + d.message; $('err').style.display='block'; });
+
+setInterval(()=>{
+  if (lastTs && Date.now()/1000 - lastTs > STALE_MS/1000)
+    $('status').style.setProperty('--state', '#8a8780');
+}, 1000);
+</script>
+</body>
+</html>
